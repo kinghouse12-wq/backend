@@ -1,83 +1,59 @@
-# Design decisions
+# Engineering decisions
 
-## Modular monolith and dependency inversion
+## Layers without unnecessary machinery
 
-The API translates HTTP into use cases. Services depend on repository, unit-of-work, password, and
-token protocols. The domain owns immutable entities and allowed transitions. Infrastructure
-implements the protocols; `create_app` wires everything together.
+Java records form the immutable domain and HTTP responses. Business transitions are framework-free;
+Spring annotations on application services supply dependency injection and transaction boundaries.
+The services depend on repository/security ports, implemented by infrastructure. JPA entities never
+leave the adapter. ArchUnit catches dependencies that reverse these boundaries.
 
-The abstractions correspond to actual boundaries. There is no generic base repository or separate
-interface for every class. An architecture test rejects outer-layer imports in domain/application.
-ORM rows stay inside the database adapter; HTTP contracts stay inside the API.
+There is one service and one relational database. There is no generic base service, reflection mapper,
+Lombok dependency, queue, distributed cache, or microservice split without a concrete requirement.
 
-## PostgreSQL deployment, SQLite feedback
+## Atomic concurrency control
 
-The schema uses UUIDs, cascading foreign keys, status/version constraints, and query-aligned
-composite indexes. All timestamps are UTC; the adapter normalizes SQLite's naive results to UTC.
-Alembic is the only runtime schema-management mechanism. Application startup never calls
-`create_all`. Tests create disposable schemas, while CI independently checks migration upgrade,
-downgrade, and drift against PostgreSQL.
+Task updates use a single JPQL bulk statement whose SQL has `WHERE version = expectedVersion`, plus
+`version = version + 1`. A zero-row update becomes `409`. The `@Version` column also supports ordinary
+JPA optimistic updates; the bulk statement explicitly increments it because bulk JPQL bypasses automatic
+entity dirty checking. The persistence context is cleared after the update to avoid stale entities.
 
-Offset pagination is simple and bounded. Deep traversal would justify keyset pagination; exact
-count/page consistency during concurrent writes would require an appropriate snapshot.
+Checking only in Java would allow two transactions to overwrite one another. The PostgreSQL test uses
+two transactions and a barrier so both read the same version before racing. Exactly one writer wins.
+Clients must fetch the latest version before retrying a conflict.
 
-## Concurrency and transactions
+## Transactional history and authorization
 
-Every task starts at version 1. The service checks ownership and rules, then the adapter executes:
+The service method's `@Transactional` boundary encloses both the task update and the status event.
+A test injects an audit-write failure and verifies that the task rolls back. History covers creation
+and status changes, not every text edit; it is project history rather than a compliance ledger.
+Database cascades deliberately remove history when its project is deleted.
 
-```sql
-UPDATE tasks
-SET title = :title, status = :status, version = :next_version, updated_at = :now
-WHERE id = :id AND project_id = :project_id AND version = :expected_version
-RETURNING id;
-```
+Every nested use case resolves the owned project before the task. A task cannot be addressed through
+another project; inaccessible and missing resources both return `404`. Ownership comes from the verified
+JWT subject, never a request body field.
 
-A zero-row result becomes `409`. Checking only in Python would still allow competing transactions
-to overwrite each other. The PostgreSQL test uses two sessions and a barrier so both writers read
-the same version before competing; exactly one update can succeed.
+## Persistence and operations
 
-The use case commits the task and its status event together. An injected audit failure verifies
-that the preceding SQL update rolls back. History covers creation/status changes, not every text
-edit. It is project history rather than a compliance ledger; project deletion cascades it.
+Flyway owns schema evolution. Hibernate validates mappings and Open Session in View is disabled.
+UUIDs, cascading foreign keys, status/version checks, and query-aligned indexes are in the migration.
+H2 offers fast local tests; CI uses PostgreSQL for database-specific behavior and real concurrency.
+Offset/page pagination is bounded; deep traversal would justify keyset pagination and stronger snapshot
+semantics if count/page consistency during concurrent inserts becomes a requirement.
 
-## Authorization before nested access
+Actuator readiness includes the database; liveness is independent. ECS JSON logs include validated
+request IDs and method/path/status/duration, without raw credentials, token bodies, or query strings.
+Containers run as a non-root user, ports bind to localhost, and credentials come from the environment.
 
-Every task/event use case resolves the owned project, then the task within that project. A task
-UUID cannot be used through an unrelated project. Missing and unauthorized resources both return
-`404` to avoid revealing another user's data. Tests use a second account for read/create/update/
-history/delete paths.
+## Security boundaries
 
-## Authentication boundaries
+Spring Security's resource-server support verifies JWT signatures using an HS256 allowlist, issuer,
+audience, required claims, expiry, and a 30-second clock tolerance. JSON credentials issue short-lived
+tokens; this API is not an OAuth authorization server. BCrypt uses cost 12 and enforces its 72-byte
+input limit. Unknown-user login attempts verify a dummy hash. Validation payloads never echo passwords.
 
-Passwords use Argon2id; unknown-user login attempts verify a dummy hash. JWTs expire after 15 minutes
-by default (maximum 60), require subject/issued-at/expiry/issuer/audience, and allow only HS256.
-Credentials are JSON: this is bearer-token authentication, not an OAuth authorization server.
-Passwords retain whitespace and must be 12–128 characters at registration and login.
-
-Signing credentials come from the environment. The bootstrap creates random local values rather
-than shipping a shared key. Requests log only method/path/status/duration/request ID, never tokens
-or credentials. Validation errors omit raw inputs, and unexpected errors return a generic message.
-
-There is no refresh-token, logout-revocation, email-verification, password-reset, or distributed
-rate-limiting system. Before public hosting, add HTTPS, login/registration gateway rate limits,
-secret management, suitable host/CORS settings, and recovery/revocation flows. Argon2 consumes
-memory; bound concurrent authentication requests at the ingress.
-
-## Synchronous I/O is intentional
-
-Routes performing SQL/password work use `def`, so FastAPI executes them in its thread pool. This
-matches the synchronous PostgreSQL driver. The async request middleware does no database work.
-An async rewrite would change adapters/transactions; it would not accelerate password hashing.
-
-## Operations and delivery
-
-Liveness is independent of database availability. Readiness executes `SELECT 1` and returns `503`
-on connection failure; it checks connectivity, not schema version. Migrations are a startup
-prerequisite enforced by Compose. The app owns/disposes its engine; each request owns one session.
-Services decide when to commit, and session closure rolls back pending work.
-
-The container uses a locked dependency set, a non-root user, a readiness health check, and no
-bundled secrets. Compose binds localhost ports and persists PostgreSQL in a named volume. Public
-deployment still requires ingress/TLS, managed backups, a migration rollout policy, error
-monitoring, and traffic-appropriate resource limits. Performance/availability are not claimed
-without measurement.
+CSRF is disabled because authentication uses explicit bearer headers and no ambient session cookies;
+sessions are stateless and CORS origins are denied by default. There are no refresh tokens, distributed
+rate limits, email verification, password reset, or logout revocation. Public hosting needs ingress/TLS,
+gateway rate limiting, secret management, recovery/revocation design, and tested backups. Heavy password
+hashing should be bounded at the ingress. Operational metrics exist through Actuator/Micrometer; the
+HTTP exposure deliberately stays limited to health/info.

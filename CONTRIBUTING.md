@@ -1,15 +1,11 @@
 # Contributing
 
-Use Python 3.12–3.14 and uv. Run `python3 scripts/bootstrap.py`, then `uv sync --frozen`.
+Use Java 21 and the Maven wrapper. Run `./mvnw spotless:apply`, then `./mvnw spotless:check verify`.
 
-Run `make check`, `make test`, and the migration checks documented in the README. Persistence
-changes need a reviewed Alembic migration with upgrade/downgrade verification. Set
-`TEST_DATABASE_URL` only to a disposable `_test` or `_tests` database.
+Keep HTTP contracts in `api`, orchestration/transactions in `application`, framework-free rules in
+`domain`, and persistence/security details in `infrastructure`. Controllers must not call JPA directly.
+Add a new versioned Flyway migration for schema changes; never edit an applied migration.
 
-Keep dependencies flowing inward: domain rules, application use cases/transaction decisions,
-infrastructure storage/security adapters, and API validation/serialization. Extend a port only
-when a use case needs it. Test observable behavior, especially authorization, rollback, and races.
-
-For API changes, run `uv run python scripts/export_openapi.py` and include `docs/openapi.json` in
-the same change. Keep the demo/README commands executable. Never commit `.env`, databases, tokens,
-or runtime logs. Describe the problem, resulting behavior, and validation in a pull request.
+Test authorization, invalid input, stale writes, and rollback—not just successful CRUD. PostgreSQL
+integration tests must target a disposable database; they remove application data. Update Swagger
+annotations, the HTTP demo, and documentation alongside API changes. Never commit `.env` or credentials.

@@ -1,7 +1,7 @@
 ## Change
 
-Describe the concrete problem and the resulting behavior.
+Describe the concrete problem and resulting behavior.
 
 ## Validation
 
-List checks and remaining limitations. Include migration and API-contract changes when relevant.
+List checks run and relevant migration, authorization, or concurrency cases.

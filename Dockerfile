@@ -1,21 +1,16 @@
-FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
-FROM python:3.12-slim AS builder
-COPY --from=uv /uv /usr/local/bin/uv
+FROM maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-COPY pyproject.toml uv.lock README.md ./
+COPY pom.xml ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN mvn -B -ntp -DskipTests package
 
-FROM python:3.12-slim AS runtime
+FROM eclipse-temurin:21-jre-alpine
+RUN apk add --no-cache curl && addgroup -g 10001 app && adduser -D -u 10001 -G app app
 WORKDIR /app
-ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN useradd --uid 10001 --create-home appuser
-COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
-COPY --chown=appuser:appuser alembic.ini ./
-COPY --chown=appuser:appuser migrations ./migrations
-USER appuser
-EXPOSE 8000
-HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "from urllib.request import urlopen; urlopen('http://localhost:8000/health/ready', timeout=3)"
-CMD ["uvicorn", "workboard.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+COPY --from=build --chown=app:app /app/target/backend-1.0.0.jar app.jar
+USER app
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0"
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
+  CMD curl --fail --silent http://localhost:8080/actuator/health/readiness || exit 1
+ENTRYPOINT ["java","-jar","/app/app.jar"]
