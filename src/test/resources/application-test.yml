@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: ${TEST_DATABASE_URL:jdbc:h2:mem:workboard;MODE=PostgreSQL;DB_CLOSE_DELAY=-1}
+    username: ${TEST_DATABASE_USER:sa}
+    password: ${TEST_DATABASE_PASSWORD:}
+app:
+  jwt-secret: test-only-signing-secret-with-at-least-32-characters
+logging:
+  level:
+    root: WARN
+    dev.workboard.api.RequestIdFilter: OFF
